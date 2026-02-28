@@ -1,0 +1,342 @@
+---
+title: "Portfolio Optimization - Step 1: Data"
+output: html_notebook
+---
+
+```{r setup}
+# Packages needed - install any you don't have:
+# install.packages(c("quantmod", "tidyverse", "lubridate"))
+
+library(quantmod)
+library(tidyverse)
+library(lubridate)
+```
+
+```{r config}
+# === YOUR SYMBOLS ===
+symbols <- c("BND", 
+             #"DBC", # "CMDY", 
+             "EES", 
+             "EEM", #"EMXF", 
+             "GRID", 
+             "IGF", 
+             "IYR", 
+             # "KRBN", 
+             "SPY", # "LCTU", 
+             # "ICLN", 
+             "TIP", 
+             "VGIT")
+
+# === WHERE TO SAVE DATA ===
+data_dir <- "portfolio_data"  # folder will be created if it doesn't exist
+dir.create(data_dir, showWarnings = FALSE)
+
+# === HOW FAR BACK ===
+start_date <- "1990-01-01"  # max reasonable; Yahoo will return what's available
+```
+
+```{r download}
+download_or_update <- function(symbol, start_date, data_dir) {
+  file_path <- file.path(data_dir, paste0(symbol, ".csv"))
+  
+  if (file.exists(file_path)) {
+    # Incremental update: read existing, find last date, fetch only new data
+    existing <- read_csv(file_path, show_col_types = FALSE)
+    last_date <- max(existing$date)
+    fetch_from <- last_date + days(1)
+    
+    if (fetch_from >= Sys.Date()) {
+      message(symbol, ": already up to date (", last_date, ")")
+      return(existing)
+    }
+    message(symbol, ": updating from ", fetch_from)
+  } else {
+    existing <- NULL
+    fetch_from <- as.Date(start_date)
+    message(symbol, ": fresh download from ", fetch_from)
+  }
+  
+  # Download from Yahoo
+  tryCatch({
+    raw <- getSymbols(symbol, src = "yahoo",
+                      from = fetch_from, to = Sys.Date(),
+                      auto.assign = FALSE)
+    
+    new_data <- data.frame(
+      date      = index(raw),
+      open      = as.numeric(Op(raw)),
+      high      = as.numeric(Hi(raw)),
+      low       = as.numeric(Lo(raw)),
+      close     = as.numeric(Cl(raw)),
+      volume    = as.numeric(Vo(raw)),
+      adj_close = as.numeric(Ad(raw))   # use this for returns - accounts for splits/dividends
+    )
+    
+    combined <- bind_rows(existing, new_data) %>%
+      distinct(date, .keep_all = TRUE) %>%
+      arrange(date)
+    
+    write_csv(combined, file_path)
+    return(combined)
+    
+  }, error = function(e) {
+    warning("Failed to download ", symbol, ": ", e$message)
+    return(existing)  # return what we have if update fails
+  })
+}
+
+# Run for all symbols
+portfolio_data <- map(symbols, ~download_or_update(.x, start_date, data_dir))
+names(portfolio_data) <- symbols
+```
+
+```{r coverage}
+# Show data coverage for each symbol - important for knowing your overlap window
+coverage <- map_dfr(symbols, function(sym) {
+  df <- portfolio_data[[sym]]
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  tibble(
+    symbol     = sym,
+    first_date = min(df$date),
+    last_date  = max(df$date),
+    n_days     = nrow(df)
+  )
+})
+
+print(coverage)
+
+# Show the common overlap window across ALL symbols
+overlap_start <- max(coverage$first_date)
+overlap_end   <- min(coverage$last_date)
+message("\nCommon overlap window: ", overlap_start, " to ", overlap_end)
+```
+
+```{r returns}
+library(PerformanceAnalytics)
+
+# Filter each symbol to the overlap window and calculate returns
+returns_list <- map(symbols, function(sym) {
+  portfolio_data[[sym]] %>%
+    filter(date >= overlap_start, date <= overlap_end) %>%
+    arrange(date) %>%
+    select(date, adj_close) %>%
+    mutate(return = adj_close / lag(adj_close) - 1) %>%
+    filter(!is.na(return)) %>%
+    select(date, return) %>%
+    rename(!!sym := return)  # name the column after the symbol
+})
+
+# Merge all into one wide data frame (dates as rows, symbols as columns)
+returns_wide <- reduce(returns_list, full_join, by = "date") %>%
+  arrange(date)
+
+# Also create an xts version - needed for PerformanceAnalytics functions
+returns_xts <- returns_wide %>%
+  column_to_rownames("date") %>%
+  as.xts()
+
+tclass(returns_xts) <- "Date"
+```
+
+```{r stats}
+rf_annual <- 0.033
+rf_daily  <- (1 + rf_annual)^(1/252) - 1
+
+stats <- map_dfr(symbols, function(sym) {
+  r      <- returns_wide[[sym]]
+  dates  <- returns_wide$date
+  excess <- r - rf_daily
+  
+  # Give maxDrawdown a clean xts with Date index
+  r_xts <- xts(r, order.by = as.Date(dates))
+  
+  tibble(
+    symbol       = sym,
+    ann_return   = prod(1 + r, na.rm = TRUE)^(252/length(r)) - 1,
+    ann_vol      = sd(r, na.rm = TRUE) * sqrt(252),
+    sharpe       = mean(excess, na.rm = TRUE) / sd(excess, na.rm = TRUE) * sqrt(252),
+    max_drawdown = as.numeric(maxDrawdown(r_xts)),
+    min_daily    = min(r, na.rm = TRUE),
+    max_daily    = max(r, na.rm = TRUE)
+  )
+}) %>%
+  mutate(across(where(is.numeric), ~round(.x, 4)))
+
+print(stats)
+```
+
+```{r correlation}
+# Correlation matrix - useful for understanding diversification
+cor_matrix <- cor(returns_wide %>% select(-date), use = "complete.obs")
+round(cor_matrix, 2)
+```
+
+---
+
+## Step 3: Backtesting Engine
+
+```{r backtest_function}
+# === REBALANCING TRIGGER HELPERS ===
+
+# Generate calendar-based rebalance dates
+# freq: "daily", "weekly", "monthly", "quarterly"
+get_rebal_dates <- function(dates, freq) {
+  dates <- as.Date(dates)
+  switch(freq,
+    daily     = dates,
+    weekly    = dates[weekdays(dates) == "Monday"],
+    monthly   = dates[!duplicated(format(dates, "%Y-%m"))],   # first trading day of each month
+    quarterly = dates[format(dates, "%m") %in% c("01","04","07","10") &
+                      !duplicated(format(dates, "%Y-%m"))],   # first trading day of quarter
+    stop("freq must be: daily, weekly, monthly, or quarterly")
+  )
+}
+
+# Check if any asset has drifted beyond threshold from target
+threshold_triggered <- function(current_weights, target_weights, threshold) {
+  if (is.null(threshold) || is.na(threshold)) return(FALSE)
+  # any(abs(current_weights - target_weights) > threshold)
+  any(abs(current_weights - target_weights) > threshold, na.rm = TRUE)
+}
+
+# === CORE BACKTEST FUNCTION ===
+# Arguments:
+#   returns         : xts of daily returns (columns = symbols)
+#   target_weights  : named numeric vector of target allocations (must sum to 1)
+#   rebal_freq      : "daily", "weekly", "monthly", "quarterly", or NULL (threshold only)
+#   rebal_threshold : max drift before forced rebalance (e.g. 0.05 = 5%), or NULL (calendar only)
+#   rf_annual       : annual risk-free rate for Sharpe calculation
+
+run_backtest <- function(returns,
+                         target_weights,
+                         rebal_freq      = "monthly",
+                         rebal_threshold = NULL,
+                         rf_annual       = 0.033) {
+
+  # Convert xts to plain matrix immediately - avoids all index class issues in loop
+  returns_mat <- as.matrix(returns)
+  syms        <- colnames(returns_mat)
+
+  target_weights <- target_weights[syms]
+  target_weights <- target_weights / sum(target_weights)
+
+  dates    <- as.Date(rownames(returns_mat))
+  n_days   <- length(dates)
+  n_assets <- length(syms)
+  rf_daily <- (1 + rf_annual)^(1/252) - 1
+
+  cal_rebal_dates <- if (!is.null(rebal_freq)) {
+    get_rebal_dates(dates, rebal_freq)
+  } else {
+    as.Date(character(0))
+  }
+
+  # === INITIALIZE ===
+  portfolio_value <- 1.0
+  current_weights <- target_weights
+
+  daily_values  <- numeric(n_days)
+  daily_weights <- matrix(NA, nrow = n_days, ncol = n_assets,
+                          dimnames = list(NULL, syms))
+  rebal_log     <- data.frame(date      = as.Date(character()),
+                              trigger   = character(),
+                              max_drift = numeric())
+
+  # === SIMULATION LOOP ===
+  for (i in seq_len(n_days)) {
+    day         <- dates[i]
+    day_returns <- returns_mat[i, ]
+    day_returns[is.na(day_returns)] <- 0  # missing = no change that day
+
+    asset_values    <- portfolio_value * current_weights * (1 + day_returns)
+    portfolio_value <- sum(asset_values)
+
+    current_weights <- if (!is.na(portfolio_value) && portfolio_value > 0) {
+      asset_values / portfolio_value
+    } else {
+      target_weights
+    }
+
+    daily_values[i]   <- portfolio_value
+    daily_weights[i,] <- current_weights
+
+    max_drift   <- max(abs(current_weights - target_weights))
+    on_calendar <- day %in% cal_rebal_dates
+    over_thresh <- threshold_triggered(current_weights, target_weights, rebal_threshold)
+
+    if ((on_calendar || over_thresh) && i < n_days) {
+      trigger <- case_when(
+        on_calendar & over_thresh ~ "both",
+        on_calendar               ~ "calendar",
+        TRUE                      ~ "threshold"
+      )
+      rebal_log       <- bind_rows(rebal_log,
+                                   data.frame(date = day, trigger = trigger,
+                                              max_drift = round(max_drift, 4)))
+      current_weights <- target_weights
+    }
+  }
+
+  # === PERFORMANCE STATS ===
+  port_returns   <- c(0, diff(daily_values) / daily_values[-n_days])
+  excess_returns <- port_returns - rf_daily
+
+  ann_return <- prod(1 + port_returns)^(252/n_days) - 1
+  ann_vol    <- sd(port_returns) * sqrt(252)
+  sharpe     <- mean(excess_returns) / sd(excess_returns) * sqrt(252)
+
+  # maxDrawdown expects xts - provide clean Date index
+  port_xts <- xts(port_returns, order.by = dates)
+  max_dd   <- as.numeric(maxDrawdown(port_xts))
+
+  list(
+    params = list(
+      rebal_freq      = rebal_freq,
+      rebal_threshold = rebal_threshold
+    ),
+    stats = tibble(
+      ann_return   = round(ann_return, 4),
+      ann_vol      = round(ann_vol, 4),
+      sharpe       = round(sharpe, 4),
+      max_drawdown = round(max_dd, 4),
+      n_rebalances = nrow(rebal_log)
+    ),
+    daily_values  = tibble(date = dates, value = daily_values),
+    daily_weights = as_tibble(daily_weights) %>% mutate(date = dates),
+    rebal_log     = rebal_log
+  )
+}
+```
+
+```{r backtest_test}
+# === TEST RUN: equal weight, monthly rebalancing + 5% drift threshold ===
+# Assumption: equal weight as a neutral starting point
+# Replace with your actual allocation once validated
+
+n_syms        <- length(symbols)
+equal_weights <- rep(1/n_syms, n_syms)
+names(equal_weights) <- symbols
+
+test_result <- run_backtest(
+  returns         = returns_xts,
+  target_weights  = equal_weights,
+  rebal_freq      = "monthly",
+  rebal_threshold = 0.05,    # rebalance if any asset drifts >5% from target
+  rf_annual       = 0.033
+)
+
+# Stats summary
+print(test_result$stats)
+
+# What triggered rebalances?
+cat("\nRebalance trigger breakdown:\n")
+print(table(test_result$rebal_log$trigger))
+
+# Equity curve
+test_result$daily_values %>%
+  ggplot(aes(x = date, y = value)) +
+  geom_line(color = "steelblue") +
+  labs(title = "Portfolio Value: Equal Weight, Monthly + 5% Threshold",
+       x = NULL, y = "Growth of $1") +
+  theme_minimal()
+```
