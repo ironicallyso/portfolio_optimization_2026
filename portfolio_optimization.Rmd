@@ -15,13 +15,14 @@ library(lubridate)
 ```{r config}
 # === YOUR SYMBOLS ===
 symbols <- c("BND", 
-             #"DBC", # "CMDY", 
+             #"DBC", # 
+             "CMDY", 
              "EES", 
              "EEM", #"EMXF", 
              "GRID", 
              "IGF", 
              "IYR", 
-             # "KRBN", 
+             "KRBN", 
              "SPY", # "LCTU", 
              # "ICLN", 
              "TIP", 
