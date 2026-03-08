@@ -4,3 +4,8 @@
 .httr-oauth
 .DS_Store
 .quarto
+portfolio_data/
+cache/
+*.nb.html
+*.png
+*.pdf
