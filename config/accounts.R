@@ -16,13 +16,13 @@ CACHE_DIR   <- "cache"
 # --- Primary account ---
 MAIN <- list(
 
-  # Live symbols (including KRBN)
+  # Live symbols
   symbols_live = c("BND", "TIP", "VGIT",
                    "IGF", "IYR",
                    "SPY", "EEM", "EES", "GRID",
                    "CMDY", "KRBN"),
 
-  # Backtest symbols (DBC proxy, KRBN excluded)
+  # Backtest symbols (uses proxies or make exclusions for shorter history symbols)
   symbols_backtest = c("BND", "TIP", "VGIT",
                        "IGF", "IYR",
                        "SPY", "EEM", "EES", "GRID",
