@@ -1,100 +1,129 @@
 # === SWEEP FUNCTIONS ===
 # Sensitivity sweep across target weights.
-# Evaluates in-sample performance across FI/Commodity weight combinations.
+# run_pairwise_sweep() is the generalized function — works for any number of clusters.
+# run_all_pairwise_sweeps() runs every combination of fixed pairs automatically.
 
 library(tidyverse)
 
-# Run sweep across FI and Commodity target weight combinations.
-# Remainder split between Equities and Real Assets equally (default)
-# or at a specified equity share via eq_share argument.
-run_sweep <- function(meta_returns,
-                      fi_targets   = c(0.05, 0.10, 0.15, 0.20, 0.25),
-                      comm_targets = c(0.05, 0.10, 0.15, 0.20, 0.25),
-                      rf_annual    = 0.033) {
-  
-  rf_daily <- (1 + rf_annual)^(1/252) - 1
-  
-  calc_stats <- function(meta_returns, weights_vec) {
-    ret_mat  <- as.matrix(meta_returns %>% select(-date))
-    port_ret <- as.numeric(ret_mat %*% weights_vec)
-    n        <- length(port_ret)
-    
-    ann_return   <- prod(1 + port_ret)^(252/n) - 1
-    ann_vol      <- sd(port_ret) * sqrt(252)
-    sharpe       <- mean(port_ret - rf_daily) / sd(port_ret) * sqrt(252)
-    cum          <- cumprod(1 + port_ret)
-    max_drawdown <- 1 - min(cum / cummax(cum))
-    
-    tibble(
-      ann_return   = round(ann_return,   4),
-      ann_vol      = round(ann_vol,      4),
-      sharpe       = round(sharpe,       4),
-      max_drawdown = round(max_drawdown, 4)
-    )
-  }
-  
-  expand_grid(fi_wt = fi_targets, comm_wt = comm_targets) %>%
-    filter(fi_wt + comm_wt <= 0.90) %>%
-    mutate(eq_wt = (1 - fi_wt - comm_wt) / 2,
-           ra_wt = (1 - fi_wt - comm_wt) / 2) %>%
-    pmap_dfr(function(fi_wt, comm_wt, eq_wt, ra_wt) {
-      wts <- c(Fixed_Income = fi_wt, Real_Assets = ra_wt,
-               Equities = eq_wt, Commodities = comm_wt)
-      wts <- wts[names(meta_returns %>% select(-date))]
-      bind_cols(
-        tibble(fi_wt = fi_wt, comm_wt = comm_wt, eq_wt = eq_wt, ra_wt = ra_wt),
-        calc_stats(meta_returns, wts)
-      )
-    }) %>%
-    mutate(calmar = round(ann_return / max_drawdown, 4))
-}
+# ── PERFORMANCE HELPER ────────────────────────────────────────────────────────
 
-# Equity vs Real Assets sweep at fixed FI and Commodity weights
-run_era_sweep <- function(meta_returns,
-                          fi_wt    = 0.25,
-                          comm_wt  = 0.05,
-                          rf_annual = 0.033) {
+calc_port_stats <- function(meta_returns, weights_vec, rf_annual = 0.033) {
+  rf_daily <- (1 + rf_annual)^(1/252) - 1
+  ret_mat  <- as.matrix(meta_returns %>% select(-date))
   
-  remainder  <- 1 - fi_wt - comm_wt
-  eq_splits  <- seq(0.10, remainder, by = 0.05)
+  # Align weights to column order
+  weights_vec <- weights_vec[colnames(ret_mat)]
   
-  run_sweep(
-    meta_returns = meta_returns,
-    fi_targets   = fi_wt,
-    comm_targets = comm_wt,
-    rf_annual    = rf_annual
+  port_ret     <- as.numeric(ret_mat %*% weights_vec)
+  n            <- length(port_ret)
+  ann_return   <- prod(1 + port_ret)^(252/n) - 1
+  ann_vol      <- sd(port_ret) * sqrt(252)
+  sharpe       <- mean(port_ret - rf_daily) / sd(port_ret) * sqrt(252)
+  cum          <- cumprod(1 + port_ret)
+  max_drawdown <- 1 - min(cum / cummax(cum))
+
+  tibble(
+    ann_return   = round(ann_return,   4),
+    ann_vol      = round(ann_vol,      4),
+    sharpe       = round(sharpe,       4),
+    max_drawdown = round(max_drawdown, 4),
+    calmar       = round(ann_return / max_drawdown, 4)
   )
 }
 
-# Heatmap plot helper
-plot_sweep_heatmap <- function(sweep_results, metric = "sharpe") {
-  pct_factor <- function(x) {
-    factor(scales::percent(x, accuracy = 1),
-           levels = scales::percent(sort(unique(x)), accuracy = 1))
+# ── PAIRWISE SWEEP ────────────────────────────────────────────────────────────
+# Fix any subset of cluster weights; sweep the split of the remainder
+# across the remaining clusters.
+#
+# Arguments:
+#   meta_returns : data frame with date + one column per cluster
+#   fixed        : named numeric vector of clusters to hold constant
+#                  e.g. c(Fixed_Income = 0.25, Commodities = 0.10)
+#   sweep_steps  : number of steps across the remainder split (default 19 = 5% increments)
+#   rf_annual    : risk-free rate
+#
+# Works for any number of clusters. With 2 free clusters: 1D sweep of their split.
+# With 3+ free clusters: splits remainder equally among all but the first free cluster,
+# sweeping only the first free cluster's share (a simplification — use fixed to
+# narrow down if you need finer control).
+
+run_pairwise_sweep <- function(meta_returns,
+                               fixed,
+                               sweep_steps = 19,
+                               rf_annual   = 0.033) {
+  all_clusters  <- names(meta_returns %>% select(-date))
+  fixed_clusters <- names(fixed)
+  free_clusters  <- setdiff(all_clusters, fixed_clusters)
+
+  missing <- setdiff(fixed_clusters, all_clusters)
+  if (length(missing) > 0) stop("Fixed clusters not in meta_returns: ", paste(missing, collapse = ", "))
+
+  remainder <- 1 - sum(fixed)
+  if (remainder < 0 || remainder > 1) stop("Fixed weights sum to ", sum(fixed), " — must be between 0 and 1")
+  if (length(free_clusters) == 0) stop("No free clusters to sweep — reduce the number of fixed clusters")
+  if (length(free_clusters) == 1) {
+    # Fully determined — no sweep needed, just evaluate the single point
+    wts <- c(fixed, setNames(remainder, free_clusters))
+    return(bind_cols(
+      as_tibble(as.list(wts)),
+      calc_port_stats(meta_returns, wts, rf_annual)
+    ))
   }
-  
-  label_fn <- if (metric %in% c("ann_return", "ann_vol", "max_drawdown")) {
-    function(x) scales::percent(x, accuracy = 0.1)
-  } else {
-    function(x) round(x, 2)
-  }
-  
-  sweep_results %>%
-    mutate(
-      fi_label   = pct_factor(fi_wt),
-      comm_label = pct_factor(comm_wt),
-      value      = .data[[metric]]
+
+  # 1D sweep: vary share of remainder going to free_clusters[1]
+  # Remaining free clusters split the rest equally
+  n_free     <- length(free_clusters)
+  free1      <- free_clusters[1]
+  free_rest  <- free_clusters[-1]
+
+  # free1 share ranges from ~0 to ~1 of remainder, in sweep_steps increments
+  free1_shares <- seq(0.05, 0.95, length.out = sweep_steps)
+
+  map_dfr(free1_shares, function(s) {
+    free1_wt   <- remainder * s
+    rest_wt    <- remainder * (1 - s) / length(free_rest)
+    free_wts   <- c(setNames(free1_wt, free1),
+                    setNames(rep(rest_wt, length(free_rest)), free_rest))
+    wts        <- c(fixed, free_wts)
+
+    bind_cols(
+      as_tibble(as.list(round(wts, 4))),
+      calc_port_stats(meta_returns, wts, rf_annual)
+    )
+  })
+}
+
+# ── RUN ALL PAIRWISE COMBINATIONS ─────────────────────────────────────────────
+# Automatically generates every combination of fixed pairs from target_weights,
+# runs a sweep for each, and returns results labeled by which pair was fixed.
+#
+# Arguments:
+#   meta_returns   : data frame with date + one column per cluster
+#   target_weights : named numeric vector (from ACCOUNT$target_weights)
+#   sweep_steps    : passed through to run_pairwise_sweep()
+#   rf_annual      : risk-free rate
+
+run_all_pairwise_sweeps <- function(meta_returns,
+                                    target_weights,
+                                    sweep_steps = 19,
+                                    rf_annual   = 0.033) {
+  all_clusters <- names(meta_returns %>% select(-date))
+
+  # All combinations of 2 clusters to fix
+  fixed_pairs <- combn(all_clusters, 2, simplify = FALSE)
+
+  map_dfr(fixed_pairs, function(pair) {
+    fixed <- target_weights[pair]
+    label <- paste0("Fix: ", paste(pair, collapse = " + "))
+
+    message("  -> ", label)
+
+    run_pairwise_sweep(
+      meta_returns = meta_returns,
+      fixed        = fixed,
+      sweep_steps  = sweep_steps,
+      rf_annual    = rf_annual
     ) %>%
-    ggplot(aes(x = comm_label, y = fi_label, fill = value)) +
-    geom_tile(color = "white") +
-    geom_text(aes(label = label_fn(value)), size = 3.5) +
-    scale_fill_gradient2(low = "firebrick", mid = "white", high = "steelblue",
-                         midpoint = median(sweep_results[[metric]])) +
-    labs(
-      title = paste0("Sweep: ", metric),
-      x     = "Commodities Target Weight",
-      y     = "Fixed Income Target Weight",
-      fill  = metric
-    ) +
-    theme_minimal()
+      mutate(fixed_pair = label)
+  })
 }

@@ -133,5 +133,122 @@ walk(all_results, function(r) {
 
 # ── SAVE ──────────────────────────────────────────────────────────────────────
 
+dir.create(CACHE_DIR, showWarnings = FALSE)
 saveRDS(all_results, file.path(CACHE_DIR, "rebal_results.rds"))
 message("\nSaved rebal_results to ", CACHE_DIR, "/")
+
+# ── PLOTS ──────────────────────────────────────────────────────────────────────
+
+library(ggplot2)
+
+# Best config per methodology (by Sharpe), excluding Cal+T
+best_configs <- results_df %>%
+  filter(!grepl("Calendar \\+ Threshold", methodology)) %>%
+  group_by(methodology) %>%
+  slice_max(sharpe, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  pull(label)
+
+# ── PLOT 1A: EQUITY CURVES (thinner lines, transparency) ─────────────────────
+
+ggplot(equity_df, aes(x = date, y = value, color = label)) +
+  geom_line(linewidth = 0.5, alpha = 0.75) +
+  scale_color_manual(values = c("steelblue", "firebrick", "darkorange")) +
+  labs(
+    title    = "Equity Curves: Best Config per Methodology",
+    subtitle = "Calendar only | Best threshold-daily | Best threshold-monthly",
+    x        = NULL,
+    y        = "Growth of $1",
+    color    = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# ── PLOT 1B: SPREAD VS CALENDAR-ONLY ─────────────────────────────────────────
+# Shows each method's daily difference from calendar-only.
+# Zero = identical to calendar; deviations reveal when methods diverge.
+
+cal_values <- all_results[["Cal only"]]$daily_values %>%
+  rename(cal_value = value)
+
+spread_df <- map_dfr(setdiff(best_configs, "Cal only"), function(lbl) {
+  all_results[[lbl]]$daily_values %>%
+    inner_join(cal_values, by = "date") %>%
+    mutate(
+      spread = value - cal_value,
+      label  = lbl
+    )
+})
+
+ggplot(spread_df, aes(x = date, y = spread, color = label)) +
+  geom_line(linewidth = 0.5, alpha = 0.75) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("firebrick", "darkorange")) +
+  labs(
+    title    = "Portfolio Value Spread vs Calendar-Only",
+    subtitle = "Positive = outperforming calendar | Negative = underperforming",
+    x        = NULL,
+    y        = "Difference in Growth of $1",
+    color    = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# ── PLOT 1C: ZOOM — 2018–2022 ─────────────────────────────────────────────────
+# COVID crash + 2022 rate hike: where rebalancing decisions matter most.
+
+equity_df %>%
+  filter(date >= as.Date("2018-01-01"), date <= as.Date("2022-12-31")) %>%
+  ggplot(aes(x = date, y = value, color = label)) +
+  geom_line(linewidth = 0.5, alpha = 0.75) +
+  scale_color_manual(values = c("steelblue", "firebrick", "darkorange")) +
+  labs(
+    title    = "Equity Curves: Zoom 2018–2022",
+    subtitle = "COVID crash + 2022 rate hike environment",
+    x        = NULL,
+    y        = "Growth of $1",
+    color    = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+# ── PLOT 2: CLUSTER WEIGHT DRIFT ──────────────────────────────────────────────
+
+drift_configs <- c("Cal only", "Thresh-daily 30%", "Thresh-monthly 20%")
+
+walk(drift_configs, function(lbl) {
+  ref <- all_results[[lbl]]
+  
+  p <- ref$daily_cluster_weights %>%
+    pivot_longer(-date, names_to = "cluster", values_to = "weight") %>%
+    left_join(
+      tibble(cluster = names(ACCOUNT$target_weights),
+             target  = as.numeric(ACCOUNT$target_weights)),
+      by = "cluster"
+    ) %>%
+    ggplot(aes(x = date, y = weight, color = cluster)) +
+    geom_line(linewidth = 0.6, alpha = 0.8) +
+    geom_hline(
+      data = tibble(cluster = names(ACCOUNT$target_weights),
+                    target  = as.numeric(ACCOUNT$target_weights)),
+      aes(yintercept = target, color = cluster),
+      linetype = "dashed", linewidth = 0.4
+    ) +
+    geom_vline(
+      data  = ref$rebal_log,
+      aes(xintercept = as.numeric(date)),
+      color = "gray50", linetype = "dotted", alpha = 0.5
+    ) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title    = paste0("Cluster Weight Drift: ", lbl),
+      subtitle = paste0("n_rebalances = ", nrow(ref$rebal_log),
+                        "  |  Solid = realized  |  Dashed = target  |  Dotted = rebalance events"),
+      x        = NULL,
+      y        = "Cluster Weight",
+      color    = NULL
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  print(p)
+})

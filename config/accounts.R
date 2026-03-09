@@ -47,9 +47,9 @@ MAIN <- list(
 
   # Target between-cluster weights
   target_weights = c(
+    Equities     = 0.45,
     Fixed_Income = 0.25,
-    Real_Assets  = 0.225,
-    Equities     = 0.425,
+    Real_Assets  = 0.20,
     Commodities  = 0.10
   ),
 
