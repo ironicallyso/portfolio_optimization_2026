@@ -22,7 +22,7 @@ clusters_live <- ACCOUNT$clusters %>%
 within_wts <- inv_vol_weights(returns_wide, clusters_live)
 
 # Apply target between-cluster weights from config
-weights_final <- full_symbol_weights(within_wts, MAIN$target_weights)
+weights_final <- full_symbol_weights(within_wts, ACCOUNT$target_weights)
 
 # Print
 cat("\n── Final Symbol Weights ─────────────────────────────────────────────\n")

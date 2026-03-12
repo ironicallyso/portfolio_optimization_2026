@@ -109,8 +109,8 @@ run_all_pairwise_sweeps <- function(meta_returns,
                                     rf_annual   = 0.033) {
   all_clusters <- names(meta_returns %>% select(-date))
 
-  # All combinations of 2 clusters to fix
-  fixed_pairs <- combn(all_clusters, 2, simplify = FALSE)
+  # All combinations of n-2 clusters to fix
+  fixed_pairs <- combn(all_clusters, length(all_clusters) - 2, simplify = FALSE)
 
   map_dfr(fixed_pairs, function(pair) {
     fixed <- target_weights[pair]

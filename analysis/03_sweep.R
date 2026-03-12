@@ -66,7 +66,7 @@ top_per_sweep %>%
     .groups    = "drop"
   ) %>%
   filter(n_sweeps > 1) %>%
-  arrange(desc(n_sweeps), desc(avg_calmar)) %>%
+  arrange(desc(avg_calmar), desc(n_sweeps)) %>%
   print(n = 20)
 
 # ── PLOTS ─────────────────────────────────────────────────────────────────────
