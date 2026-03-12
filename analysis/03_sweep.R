@@ -47,6 +47,17 @@ sweep_results %>%
   arrange(fixed_pair, desc(calmar)) %>%
   print(n = Inf)
 
+# Tangency portfolio: max Sortino per fixed pair
+cat("\n── Tangency Portfolio (Max Sortino) per Fixed Pair ─────────────────\n")
+sweep_results %>%
+  group_by(fixed_pair) %>%
+  slice_max(sortino, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(across(where(is.double) & !c(sharpe, sortino, calmar, ann_return, ann_vol, max_drawdown),
+                ~scales::percent(.x, accuracy = 1))) %>%
+  arrange(desc(sortino)) %>%
+  print(n = Inf)
+
 # Convergence: which weight combinations appear in the top 5 across multiple sweeps?
 cat("\n── Convergence: Top Allocations Across Sweeps ───────────────────────\n")
 top_per_sweep <- sweep_results %>%

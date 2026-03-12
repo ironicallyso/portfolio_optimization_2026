@@ -22,10 +22,14 @@ calc_port_stats <- function(meta_returns, weights_vec, rf_annual = 0.033) {
   cum          <- cumprod(1 + port_ret)
   max_drawdown <- 1 - min(cum / cummax(cum))
 
+  downside_dev <- sqrt(mean(pmin(port_ret - rf_daily, 0)^2)) * sqrt(252)
+  sortino      <- (ann_return - rf_annual) / downside_dev
+  
   tibble(
     ann_return   = round(ann_return,   4),
     ann_vol      = round(ann_vol,      4),
     sharpe       = round(sharpe,       4),
+    sortino      = round(sortino,      4),
     max_drawdown = round(max_drawdown, 4),
     calmar       = round(ann_return / max_drawdown, 4)
   )
@@ -77,14 +81,19 @@ run_pairwise_sweep <- function(meta_returns,
   free_rest  <- free_clusters[-1]
 
   # free1 share ranges from ~0 to ~1 of remainder, in sweep_steps increments
-  free1_shares <- seq(0.05, 0.95, length.out = sweep_steps)
-
-  map_dfr(free1_shares, function(s) {
-    free1_wt   <- remainder * s
-    rest_wt    <- remainder * (1 - s) / length(free_rest)
+  # free1_shares <- seq(0.05, 0.95, length.out = sweep_steps)
+  free1_seq <- seq(0.05, remainder - 0.05 * length(free_rest), by = 0.01)
+  
+  
+  #map_dfr(free1_shares, function(s) {
+  map_dfr(free1_seq, function(free1_wt) {
+    # free1_wt   <- remainder * s
+    # rest_wt    <- remainder * (1 - s) / length(free_rest)
+    rest_wt    <- (remainder - free1_wt) / length(free_rest)
     free_wts   <- c(setNames(free1_wt, free1),
                     setNames(rep(rest_wt, length(free_rest)), free_rest))
     wts        <- c(fixed, free_wts)
+    if (any(wts > 0.75) || any(wts < 0.05)) return(tibble())
 
     bind_cols(
       as_tibble(as.list(round(wts, 4))),
