@@ -129,6 +129,60 @@ walk(unique(sweep_results$fixed_pair), function(fp) {
   print(p)
 })
 
+# Sortino by sweep — mirror of Calmar line charts
+walk(unique(sweep_results$fixed_pair), function(fp) {
+  pair_results <- sweep_results %>% filter(fixed_pair == fp)
+  fixed_names  <- str_extract_all(fp, paste(cluster_cols, collapse = "|"))[[1]]
+  free_names   <- setdiff(cluster_cols, fixed_names)
+  
+  if (length(free_names) < 2) return(NULL)
+  
+  free1 <- free_names[1]
+  
+  p <- pair_results %>%
+    ggplot(aes(x = .data[[free1]], y = sortino)) +
+    geom_line(color = "darkorange", linewidth = 1) +
+    geom_point(color = "darkorange", size = 2.5) +
+    geom_vline(
+      xintercept = ACCOUNT$target_weights[free1],
+      linetype   = "dashed", color = "firebrick", alpha = 0.7
+    ) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title    = paste0("Sortino vs ", free1, " Weight"),
+      subtitle = paste0(fp, "  |  Dashed = current config"),
+      x        = paste0(free1, " Weight"),
+      y        = "Sortino Ratio"
+    ) +
+    theme_minimal()
+  
+  print(p)
+})
+
+# Efficient frontier: ann_return vs ann_vol, colored by Sortino
+# Tangency portfolio (max Sortino) highlighted per fixed pair
+tangency_pts <- sweep_results %>%
+  group_by(fixed_pair) %>%
+  slice_max(sortino, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+sweep_results %>%
+  ggplot(aes(x = ann_vol, y = ann_return, color = sortino)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_point(data = tangency_pts, size = 4, shape = 18, color = "firebrick") +
+  facet_wrap(~fixed_pair, scales = "free") +
+  scale_color_gradient(low = "steelblue", high = "darkorange") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title    = "Efficient Frontier by Fixed Pair",
+    subtitle = "Diamond = tangency portfolio (max Sortino)",
+    x        = "Annualized Volatility",
+    y        = "Annualized Return",
+    color    = "Sortino"
+  ) +
+  theme_minimal()
+
 # ── SAVE ──────────────────────────────────────────────────────────────────────
 
 dir.create(CACHE_DIR, showWarnings = FALSE)
