@@ -63,9 +63,19 @@ selected on dendrogram and economic interpretability.
 highly correlated, so risk-based weighting is appropriate.
 
 **Between-cluster weights:** Equal weight method, validated via walk-forward
-out-of-sample testing against ERC (Equal Risk Contribution) and Minimum Variance alternatives. Target
-allocations per cluster are configurable in `config/accounts.R` and subject
-to ongoing calibration via the pairwise sensitivity sweep.
+out-of-sample testing against ERC (Equal Risk Contribution) and Minimum Variance
+alternatives. Target allocations per cluster are configurable in `config/accounts.R`
+and calibrated via the pairwise sensitivity sweep.
+
+**Target weight optimization:** The sweep evaluates all pairwise cluster weight
+combinations (5% minimum, 75% maximum per cluster). The tangency
+portfolio — the allocation maximizing the Sortino ratio given the configured
+risk-free rate — is identified per sweep and used as the primary decision criterion.
+Calmar ratio output is retained for capital-preservation-oriented accounts (e.g. HSA).
+
+**Performance metrics:** Each scenario is evaluated on annualized return, annualized
+volatility, Sharpe ratio, Sortino ratio (MAR = risk-free rate), max drawdown, and
+Calmar ratio.
 
 **Rebalancing:** Two-level engine — inter-cluster triggers on a quarterly
 calendar (Monday after triple-witching Friday) and/or a proportional drift
